@@ -1,156 +1,94 @@
-import binascii
+import argparse
 import fdt
+import logging
+import sys
+
+logger = logging.getLogger(__name__)
+
+RFPA_OFFSET = 0x400
+RFPA_MAGIC = b"BLRFPARA"
 
 
-def little_endian(data):
-    return binascii.hexlify(binascii.unhexlify(data)[::-1]).decode("utf-8")
+def dts2tlv(dts):
+
+    with open(dts, "r") as dts_f:
+        fdt_obj = fdt.parse_dts(dts_f.read())
+
+    def tlv(type, name, path, word_size=1):
+        """
+        type is the type in the final tlv
+        name and path are the same as fdt_obj.get_property
+        word_size set the word size of single element
+        """
+
+        out = bytearray()
+        try:
+            obj = fdt_obj.get_property(name, path)
+        except ValueError:
+            return out
+
+        out += type.to_bytes(2, "little")
+        if isinstance(obj, fdt.items.PropStrings):
+            out += len(obj[0]).to_bytes(2, "little")
+            out += bytes(obj[0], "ascii")
+        elif isinstance(obj, fdt.items.PropWords):
+            if len(obj) > 1:
+                out += (len(obj) * word_size).to_bytes(2, "little")
+                for elem in obj:
+                    out += elem.to_bytes(word_size, "little")
+            else:
+                out += word_size.to_bytes(2, "little")
+                out += obj[0].to_bytes(word_size, "little")
+
+        return out
+
+    out = bytearray(b"O6DkXb1k")  # init magic
+    out += tlv(0x1, "xtal_mode", "wifi/brd_rf")
+    out += tlv(0x2, "xtal", "wifi/brd_rf", word_size=0x4)
+    out += tlv(0x3, "pwr_mode", "wifi/brd_rf")
+    out += tlv(0x5, "pwr_table_11b", "wifi/brd_rf")
+    out += tlv(0x6, "pwr_table_11g", "wifi/brd_rf")
+    out += tlv(0x7, "pwr_table_11n", "wifi/brd_rf")
+    out += tlv(0x8, "pwr_offset", "wifi/brd_rf")
+    out += tlv(0x20, "en_tcal", "wifi/rf_temp")
+    out += tlv(0x21, "linear_or_follow", "wifi/rf_temp")
+    out += tlv(0x22, "Tchannels", "wifi/rf_temp", word_size=0x2)
+    out += tlv(0x23, "Tchannel_os", "wifi/rf_temp", word_size=0x2)
+    out += tlv(0x24, "Tchannel_os_low", "wifi/rf_temp", word_size=0x2)
+    out += tlv(0x25, "Troom_os", "wifi/rf_temp", word_size=0x2)
+    out += tlv(0x30, "pwr_table_ble", "bluetooth/brd_rf", word_size=0x4)
+
+    logger.debug(out.hex())
+    return out
 
 
-def bl_dts2hex(dts):
-    with open(dts, "r", encoding="utf-8") as (f):
-        tmp_dts = f.read()
-    fdt_obj = fdt.parse_dts(tmp_dts)
-    xtal_mode = fdt_obj.get_property("xtal_mode", "wifi/brd_rf")
-    xtal = fdt_obj.get_property("xtal", "wifi/brd_rf")
-    pwr_mode = fdt_obj.get_property("pwr_mode", "wifi/brd_rf")
-    pwr_offset = fdt_obj.get_property("pwr_offset", "wifi/brd_rf")
-    pwr_table_11b = fdt_obj.get_property("pwr_table_11b", "wifi/brd_rf")
-    pwr_table_11g = fdt_obj.get_property("pwr_table_11g", "wifi/brd_rf")
-    pwr_table_11n = fdt_obj.get_property("pwr_table_11n", "wifi/brd_rf")
-    en_tcal = fdt_obj.get_property("en_tcal", "wifi/rf_temp")
-    linear_or_follow = fdt_obj.get_property("linear_or_follow", "wifi/rf_temp")
-    tchannels = fdt_obj.get_property("Tchannels", "wifi/rf_temp")
-    tchannel_os = fdt_obj.get_property("Tchannel_os", "wifi/rf_temp")
-    tchannel_os_low = fdt_obj.get_property("Tchannel_os_low", "wifi/rf_temp")
-    troom_os = fdt_obj.get_property("Troom_os", "wifi/rf_temp")
-    pwr_table_ble = fdt_obj.get_property("pwr_table_ble", "bluetooth/brd_rf")
-    init_hex = little_endian(bytes("k1bXkD6O", encoding="ascii").hex())
-    if xtal_mode:
-        length = "%02x" % len(xtal_mode[0])
-        xtal_mode_hex = (
-            "0100" + length + "00" + bytes(xtal_mode[0], encoding="ascii").hex()
-        )
-    else:
-        xtal_mode_hex = ""
-    if xtal:
-        xtal_hex = "02001400"
-        for item in xtal:
-            item_hex = little_endian("%08x" % item)
-            xtal_hex += item_hex
+def patch(input, dts, output):
+    with open(input, "rb") as f_i:
+        ba = bytearray(f_i.read())
 
-    else:
-        xtal_hex = ""
-    if pwr_mode:
-        length = "%02x" % len(pwr_mode[0])
-        pwr_mode_hex = (
-            "0300" + length + "00" + bytes(pwr_mode[0], encoding="ascii").hex()
-        )
-    else:
-        pwr_mode_hex = ""
-    if pwr_table_11b:
-        pwr_table_11b_hex = "05000400"
-        for item in pwr_table_11b:
-            item_hex = "%02x" % item
-            pwr_table_11b_hex += item_hex
+    tlv_offset = RFPA_OFFSET + len(RFPA_MAGIC)
+    if ba[RFPA_OFFSET:tlv_offset] != RFPA_MAGIC:
+        logger.error("Input file doesn't support patching")
+        sys.exit(1)
 
-    else:
-        pwr_table_11b_hex = ""
-    if pwr_table_11g:
-        pwr_table_11g_hex = "06000800"
-        for item in pwr_table_11g:
-            item_hex = "%02x" % item
-            pwr_table_11g_hex += item_hex
+    tlv = dts2tlv(dts)
+    ba[tlv_offset : tlv_offset + len(tlv)] = tlv
 
+    if output == '-':
+        sys.stdout.buffer.write(ba)
     else:
-        pwr_table_11g_hex = ""
-    if pwr_table_11n:
-        pwr_table_11n_hex = "07000800"
-        for item in pwr_table_11n:
-            item_hex = "%02x" % item
-            pwr_table_11n_hex += item_hex
-
-    else:
-        pwr_table_11n_hex = ""
-    if pwr_offset:
-        pwr_offset_hex = "08000e00"
-        for item in pwr_offset:
-            item_hex = "%02x" % item
-            pwr_offset_hex += item_hex
-
-    else:
-        pwr_offset_hex = ""
-    if en_tcal:
-        en_tcal_hex = "20000100%02x" % en_tcal[0]
-    else:
-        en_tcal_hex = ""
-    if linear_or_follow:
-        linear_or_follow_hex = "21000100%02x" % linear_or_follow[0]
-    else:
-        linear_or_follow_hex = ""
-    if tchannels:
-        tchannels_hex = "22000a00"
-        for item in tchannels:
-            item_hex = little_endian("%04x" % item)
-            tchannels_hex += item_hex
-
-    else:
-        tchannels_hex = ""
-    if tchannel_os:
-        tchannel_os_hex = "23000a00"
-        for item in tchannel_os:
-            item_hex = little_endian("%04x" % item)
-            tchannel_os_hex += item_hex
-
-    else:
-        tchannel_os_hex = ""
-    if tchannel_os_low:
-        tchannel_os_low_hex = "24000a00"
-        for item in tchannel_os_low:
-            item_hex = little_endian("%04x" % item)
-            tchannel_os_low_hex += item_hex
-
-    else:
-        tchannel_os_low_hex = ""
-    if troom_os:
-        troom_os_hex = "25000200" + little_endian("%04x" % troom_os[0])
-    else:
-        troom_os_hex = ""
-    if pwr_table_ble:
-        pwr_table_ble_hex = "30000400" + little_endian("%08x" % pwr_table_ble[0])
-    else:
-        pwr_table_ble_hex = ""
-    dts_hex = (
-        init_hex
-        + xtal_mode_hex
-        + xtal_hex
-        + pwr_mode_hex
-        + pwr_table_11b_hex
-        + pwr_table_11g_hex
-        + pwr_table_11n_hex
-        + pwr_offset_hex
-        + en_tcal_hex
-        + linear_or_follow_hex
-        + tchannels_hex
-        + tchannel_os_hex
-        + tchannel_os_low_hex
-        + troom_os_hex
-        + pwr_table_ble_hex
-    )
-    print(dts_hex)
-    return bytearray.fromhex(dts_hex)
-
-def merge(input, b, output):
-    with open(input, 'rb') as i:
-        ba = bytearray(i.read())
-        ba[1032:1032 + len(b)] = b
-
-    output.write(ba)
+        with open(output, "wb") as f_o:
+            f_o.write(ba)
 
 
 if __name__ == "__main__":
-    import sys
-    _, input, dts = sys.argv
 
-    with open('out', 'wb') as output:
-        merge(input, bl_dts2hex(dts), output)
+    logging.basicConfig()
 
+    parser = argparse.ArgumentParser()
+    parser.add_argument("input", help="binary file to patch")
+    parser.add_argument("dts", help="dts file for board")
+    parser.add_argument("output", help="output file (use - for stdout)")
+
+    args = parser.parse_args()
+    patch(args.input, args.dts, args.output)
